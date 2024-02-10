@@ -90,7 +90,7 @@ Once you are done setting up the project, you can now start working with the MET
 
 1. Load the `data.table` (and the `dtplyr` and `dplyr` packages), `mgcv`, `ggplot2`, `leaflet`, `kableExtra`.
 
-```{r packages warnings=FALSE}
+```{r packages, warnings=FALSE}
 library(data.table)
 library(dtplyr)
 library(dplyr)
@@ -110,7 +110,7 @@ met <- data.table::fread("met_all_2023.gz")
 
 2. Load the met data from https://github.com/JSC370/JSC370-2024/main/data/met_all_2023.gz or  (Use https://raw.githubusercontent.com/JSC370/JSC370-2024/main/data/met_all_2023.gz to download programmatically), and also the station data. For the latter, you can use the code we used during lecture to pre-process the stations data:
 
-```{r stations-data, eval = FALSE}
+```{r stations-data}
 # Download the data
 stations <- fread("ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv")
 stations[, USAF := as.integer(USAF)]
@@ -131,12 +131,23 @@ stations[, n := 1:.N, by = .(USAF)]
 stations <- stations[n == 1,][, n := NULL]
 
 # Read in the met data and fix lat, lon, temp
+met <- data.table::fread("met_all_2023.gz")
+met$lat <- met$lat/1000
+met$lon <- met$lon/1000
+met$temp <- met$temp/10
 ```
 
 3. Merge the data as we did during the lecture. Use the `merge()` code and you can also try the tidy way with `left_join()`
 
 ```{r}
-
+met_merged <- merge(
+  x = met,
+  y = stations,
+  by.x = "USAFID",
+  by.y = "USAF",
+  all.x = TRUE,
+  all.y = FALSE
+)
 ```
 
 ## Question 1: Identifying Representative Stations
@@ -144,13 +155,35 @@ stations <- stations[n == 1,][, n := NULL]
 Across all weather stations, which stations have the median values of temperature, wind speed, and atmospheric pressure? Using the `quantile()` function, identify these three stations. Do they coincide?
 
 ```{r}
+median_temp_station <- met_merged[
+  with(met_merged, which.min(temp != quantile(temp, .5, type = 1, na.rm=TRUE)))
+]
 
+median_wind.sp_station <- met_merged[
+  with(met_merged, which.min(wind.sp != quantile(wind.sp, .5, type = 1, na.rm=TRUE)))
+]
+  
+median_atm.press_station <- met_merged[
+  with(met_merged, which.min(atm.press != quantile(atm.press, .5, type = 1, na.rm=TRUE)))
+]
+
+median_temp_station$USAFID
+median_wind.sp_station$USAFID
+median_atm.press_station$USAFID
 ```
+
+Station 690150 has the median temp, wind.sp, and atm.press.
 
 Next identify the stations have these median values.
 
 ```{r}
+median_temp <- quantile(met_merged$temp, 0.5, na.rm=TRUE)
+median_wind.sp <- quantile(met_merged$wind.sp, 0.5, na.rm=TRUE)
+median_atm.press <- quantile(met_merged$atm.press, 0.5, na.rm=TRUE)
 
+median_temp == median_temp_station$temp
+median_wind.sp == median_wind.sp_station$wind.sp
+median_atm.press == median_atm.press_station$atm.press
 ```
 
 Knit the document, commit your changes, and save it on GitHub. Don't forget to add `README.md` to the tree, the first time you render it.
@@ -160,7 +193,12 @@ Knit the document, commit your changes, and save it on GitHub. Don't forget to a
 Now let's find the weather stations by state with closest temperature and wind speed based on the euclidean distance from these medians. 
 
 ```{r}
-
+closest_temp_wind <- met_merged %>%
+  mutate(dist_to_med = sqrt((temp-median_temp)^2+(wind.sp-median_wind.sp)^2)) %>%
+  select(USAFID, STATE, dist_to_med, lat, lon) %>%
+  group_by(STATE) %>%
+  slice_min(order_by=dist_to_med, n=1, with_ties=FALSE)
+closest_temp_wind
 ```
 
 Knit the doc and save it on GitHub.
@@ -170,6 +208,28 @@ Knit the doc and save it on GitHub.
 For each state, identify which station is closest to the geographic mid-point (median) of the state. Combining these with the stations you identified in the previous question, use `leaflet()` to visualize all ~100 points in the same figure, applying different colors for the geographic median and the temperature and wind speed median.
 
 ```{r}
+geo_medians <- met_merged %>%
+  group_by(STATE) %>%
+  summarise(med_lat = median(LAT, na.rm=TRUE), med_lon=median(LON, na.rm=TRUE))
+
+closest_geo <- merge(x=met_merged, y=geo_medians, 
+                     by.x = "STATE", by.y = "STATE", all=TRUE)
+
+closest_geo <- closest_geo %>%
+  mutate(dist_to_med = sqrt((lat-med_lat)^2+(lon-med_lon)^2)) %>%
+  select(USAFID, STATE, dist_to_med, lat, lon) %>%
+  group_by(STATE) %>%
+  slice_min(order_by=dist_to_med, n=1, with_ties=FALSE)
+
+leaflet() %>%
+  addProviderTiles('CartoDB.Positron') %>%
+  addCircles(data=closest_temp_wind,
+             lat= ~lat, lng= ~lon, popup = "Closest Station to Median Temp and Wind Speed",
+             opacity = 1, radius = 400, color = "blue") %>%
+  addCircles(data=closest_geo,
+             lat = ~lat, lng = ~lon, popup = "Closest Station to Geographic Mid Point",
+             opacity = 1, radius = 400, color = "red")
+
 
 ```
 
@@ -186,7 +246,11 @@ Use the following breakdown for elevation:
 - High: elev >= 401
 
 ```{r}
-
+low <- met_merged[(elev < 93), .(low_temp_avg=mean(temp, na.rm=TRUE)), by=STATE]
+mid <- met_merged[(elev >= 93 & elev < 401), .(mid_temp_avg=mean(temp, na.rm=TRUE)), by=STATE]
+high <- met_merged[(elev >= 401), .(high_temp_avg=mean(temp, na.rm=TRUE)), by=STATE]
+merge(merge(low, mid, all=TRUE), high, all=TRUE)[order(STATE)] %>%
+  kable()
 ```
 
 
@@ -201,9 +265,34 @@ Let's practice running regression models with smooth functions on X. We need the
 
 - fit both a linear model and a spline model (use `gam()` with a cubic regression spline on wind speed). Summarize and plot the results from the models and interpret which model is the best fit and why.
 
-```{r}
+```{r message=FALSE}
+met_medians <- met_merged[, .(
+  atm.press = median(atm.press, na.rm=TRUE),
+  temp = median(temp, na.rm=TRUE)
+),
+by=USAFID]
 
+met_ldt <- lazy_dt(met_medians, immutable=FALSE)
+met_ldt <- met_ldt %>% filter(atm.press >= 10000 & atm.press <= 10200)  %>%
+  as.data.table()
+
+met_ldt %>% 
+  ggplot(aes(y=temp, x=atm.press)) + 
+  geom_point() + 
+  geom_smooth(method="lm", color="red", se=FALSE) +
+  geom_smooth(method="gam", color="blue", se=FALSE) + 
+  labs(x="Temprature", y="Atmospheric Pressure") +
+  theme_bw()
+
+lm_temp <- lm(temp ~ atm.press, data=met_ldt)
+summary(lm_temp)
+gam_temp <- gam(temp~s(atm.press, bs='cr'), data=met_ldt)
+summary(gam_temp)
+plot(gam_temp)
 ```
+The GAM model appears to be slightly better fit. The adjusted r-squared of the
+GAM is 0.297 and the deviance explained is 30.2% versus the linear regression
+model which has an adjusted r-squared of 0.2638 which is moderately worse.
 
 ## Deliverables
 
